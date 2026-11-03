@@ -5,7 +5,7 @@ import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 import { verifyToken } from "./middleware/verifyToken.js";
 
-const app = express();
+export const app = express();
 
 const PORT =  3000;
 
@@ -30,9 +30,21 @@ const upcommingCollection = db.collection("upcomming-events");
 const joinedEventsCollection = db.collection("joined-events");
 
 // Middleware
+const allowedOrigins = (
+  process.env.CLIENT_URL || "http://localhost:10000"
+)
+  .split(",")
+  .map((origin) => origin.trim());
+
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:10000",
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Origin not allowed by CORS"));
+    },
   })
 );
 
@@ -715,40 +727,34 @@ app.post(
 
 
 
-async function startServer() {
-  try {
-    console.log("Connecting to MongoDB...");
+// Reusable MongoDB connection for Netlify Functions
+let connectionPromise = null;
 
-    await client.connect();
+export async function connectDatabase() {
+  if (!connectionPromise) {
+    connectionPromise = (async () => {
+      console.log("Connecting to MongoDB...");
 
-    console.log("MongoDB connected successfully!");
+      await client.connect();
 
-    console.log("Creating joined-events index...");
+      console.log("MongoDB connected successfully!");
 
-    await joinedEventsCollection.createIndex(
-      {
-        eventId: 1,
-        userId: 1,
-      },
-      {
-        unique: true,
-      }
-    );
+      await joinedEventsCollection.createIndex(
+        {
+          eventId: 1,
+          userId: 1,
+        },
+        {
+          unique: true,
+        }
+      );
 
-    console.log("Joined-events index created successfully!");
-
-    // Start server only once, after database setup
-    app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
+      console.log("Joined-events index ready.");
+    })().catch((error) => {
+      connectionPromise = null;
+      throw error;
     });
-
-  } catch (error) {
-    console.error("Server startup failed:", error);
-    process.exit(1);
   }
+
+  return connectionPromise;
 }
-
-startServer();
-
-
-startServer();
