@@ -451,6 +451,87 @@ app.patch("/upcomming-events/:id", verifyToken, async (req, res) => {
 });
 
 
+// Get events joined by the authenticated user
+app.get("/joined-events", verifyToken, async (req, res) => {
+  try {
+    const joinedEvents = await joinedEventsCollection
+      .aggregate([
+        // Get only current user's registrations
+        {
+          $match: {
+            userId: req.user.id,
+          },
+        },
+
+        // Join with original events collection
+        {
+          $lookup: {
+            from: "upcomming-events",
+            localField: "eventId",
+            foreignField: "_id",
+            as: "event",
+          },
+        },
+
+        // Flatten joined event
+        {
+          $unwind: "$event",
+        },
+
+        // Normalize event date for sorting
+        {
+          $addFields: {
+            sortEventDate: {
+              $convert: {
+                input: "$event.eventDate",
+                to: "date",
+                onError: null,
+                onNull: null,
+              },
+            },
+          },
+        },
+
+        // Sort by event date ascending
+        {
+          $sort: {
+            sortEventDate: 1,
+          },
+        },
+
+        // Return required event information
+        {
+          $project: {
+            _id: "$event._id",
+            title: "$event.title",
+            description: "$event.description",
+            eventType: "$event.eventType",
+            thumbnailUrl: "$event.thumbnailUrl",
+            location: "$event.location",
+            eventDate: "$event.eventDate",
+            creatorEmail: "$event.creatorEmail",
+            joinedAt: 1,
+          },
+        },
+      ])
+      .toArray();
+
+    return res.status(200).json({
+      success: true,
+      count: joinedEvents.length,
+      data: joinedEvents,
+    });
+  } catch (error) {
+    console.error("Fetch joined events error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch joined events.",
+    });
+  }
+});
+
+
 
 // Delete an event (Protected Route)
 app.delete("/upcomming-events/:id", verifyToken, async (req, res) => {
@@ -633,6 +714,7 @@ app.post(
 );
 
 
+
 async function startServer() {
   try {
     console.log("Connecting to MongoDB...");
@@ -642,11 +724,6 @@ async function startServer() {
     console.log("MongoDB connected successfully!");
 
     console.log("Creating joined-events index...");
-
-    app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
-    });
-
 
     await joinedEventsCollection.createIndex(
       {
@@ -660,13 +737,18 @@ async function startServer() {
 
     console.log("Joined-events index created successfully!");
 
+    // Start server only once, after database setup
     app.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
     });
 
   } catch (error) {
     console.error("Server startup failed:", error);
+    process.exit(1);
   }
 }
+
+startServer();
+
 
 startServer();
