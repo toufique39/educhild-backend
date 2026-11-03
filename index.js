@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
+import { verifyToken } from "./middleware/verifyToken.js";
 
 const app = express();
 
@@ -26,6 +27,7 @@ const db = client.db(MONGO_DB);
 
 // Collection
 const upcommingCollection = db.collection("upcomming-events");
+const joinedEventsCollection = db.collection("joined-events");
 
 // Middleware
 app.use(
@@ -42,6 +44,7 @@ app.use(express.json());
 app.get("/", (req, res) => {
   res.send("Welcome to EduChild API!");
 });
+
 
 
 
@@ -162,6 +165,335 @@ app.get("/upcomming-events", async (req, res) => {
   }
 });
 
+// Create a new event (Protected Route)
+app.post("/upcomming-events", verifyToken, async (req, res) => {
+  try {
+    const {
+      title,
+      description,
+      eventType,
+      thumbnailUrl,
+      location,
+      eventDate,
+    } = req.body;
+
+    // Validate required fields
+    if (
+      !title?.trim() ||
+      !description?.trim() ||
+      !eventType ||
+      !thumbnailUrl ||
+      !location?.area?.trim() ||
+      !location?.city?.trim() ||
+      !eventDate
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide all required event information.",
+      });
+    }
+
+    // Validate thumbnail URL
+    let imageUrl;
+
+    try {
+      imageUrl = new URL(thumbnailUrl);
+
+      if (!["http:", "https:"].includes(imageUrl.protocol)) {
+        throw new Error("Invalid image URL");
+      }
+    } catch {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid thumbnail URL.",
+      });
+    }
+
+    // Validate event date
+    const parsedEventDate = new Date(eventDate);
+
+    if (
+      Number.isNaN(parsedEventDate.getTime()) ||
+      parsedEventDate.getTime() <= Date.now()
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Event date must be in the future.",
+      });
+    }
+
+    // Create event document
+    const newEvent = {
+      title: title.trim(),
+      description: description.trim(),
+      eventType,
+      thumbnailUrl: imageUrl.href,
+
+      location: {
+        area: location.area.trim(),
+        city: location.city.trim(),
+      },
+
+      eventDate: parsedEventDate,
+
+      // Creator information comes from verified JWT
+      creatorEmail: req.user.email,
+      creatorId: req.user.id,
+      creatorName: req.user.name,
+
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    // Save to MongoDB
+    const result = await upcommingCollection.insertOne(newEvent);
+
+    return res.status(201).json({
+      success: true,
+      message: "Event created successfully.",
+      data: {
+        ...newEvent,
+        _id: result.insertedId.toString(),
+      },
+    });
+  } catch (error) {
+    console.error("Event creation error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create event.",
+    });
+  }
+});
+
+// Get events created by the authenticated user
+app.get("/my-events", verifyToken, async (req, res) => {
+  try {
+    const events = await upcommingCollection
+      .find({
+        $or: [
+          { creatorId: req.user.id },
+          { creatorEmail: req.user.email },
+        ],
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.status(200).json({
+      success: true,
+      count: events.length,
+      data: events,
+    });
+  } catch (error) {
+    console.error("Fetch my events error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch your events.",
+    });
+  }
+});
+
+
+// Update an event (Protected Route)
+app.patch("/upcomming-events/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid event ID.",
+      });
+    }
+
+    // Only update events belonging to the authenticated user
+    const filter = {
+      _id: new ObjectId(id),
+      $or: [
+        { creatorId: req.user.id },
+        { creatorEmail: req.user.email },
+      ],
+    };
+
+    const {
+      title,
+      description,
+      eventType,
+      thumbnailUrl,
+      location,
+      eventDate,
+    } = req.body;
+
+    const updates = {};
+
+    if (title !== undefined) {
+      if (typeof title !== "string" || !title.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Event title is required.",
+        });
+      }
+
+      updates.title = title.trim();
+    }
+
+    if (description !== undefined) {
+      if (typeof description !== "string" || !description.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Event description is required.",
+        });
+      }
+
+      updates.description = description.trim();
+    }
+
+    if (eventType !== undefined) {
+      if (typeof eventType !== "string" || !eventType.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Event type is required.",
+        });
+      }
+
+      updates.eventType = eventType;
+    }
+
+    if (thumbnailUrl !== undefined) {
+      try {
+        const imageUrl = new URL(thumbnailUrl);
+
+        if (!["http:", "https:"].includes(imageUrl.protocol)) {
+          throw new Error("Invalid image URL");
+        }
+
+        updates.thumbnailUrl = imageUrl.href;
+      } catch {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid thumbnail URL.",
+        });
+      }
+    }
+
+    if (location !== undefined) {
+      if (
+        typeof location.area !== "string" ||
+        !location.area.trim() ||
+        typeof location.city !== "string" ||
+        !location.city.trim()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Valid area and city are required.",
+        });
+      }
+
+      updates.location = {
+        area: location.area.trim(),
+        city: location.city.trim(),
+      };
+    }
+
+    if (eventDate !== undefined) {
+      const parsedDate = new Date(eventDate);
+
+      if (
+        Number.isNaN(parsedDate.getTime()) ||
+        parsedDate.getTime() <= Date.now()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Event date must be in the future.",
+        });
+      }
+
+      updates.eventDate = parsedDate;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid update information provided.",
+      });
+    }
+
+    updates.updatedAt = new Date();
+
+    const result = await upcommingCollection.updateOne(
+      filter,
+      { $set: updates }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found or you are not authorized to update it.",
+      });
+    }
+
+    const updatedEvent = await upcommingCollection.findOne(filter);
+
+    return res.status(200).json({
+      success: true,
+      message: "Event updated successfully.",
+      data: updatedEvent,
+    });
+  } catch (error) {
+    console.error("Update event error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update event.",
+    });
+  }
+});
+
+
+
+// Delete an event (Protected Route)
+app.delete("/upcomming-events/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid event ID.",
+      });
+    }
+
+    const result = await upcommingCollection.deleteOne({
+      _id: new ObjectId(id),
+      $or: [
+        { creatorId: req.user.id },
+        { creatorEmail: req.user.email },
+      ],
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found or you are not authorized to delete it.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Event deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Delete event error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete event.",
+    });
+  }
+});
+
+
 
 
 app.get("/upcomming-events/:id", async (req, res) => {
@@ -210,26 +542,130 @@ app.get("/upcomming-events/:id", async (req, res) => {
   }
 });
 
+// Join an event (Protected Route)
+app.post(
+  "/upcomming-events/:id/join",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      // Validate event ID
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid event ID.",
+        });
+      }
+
+      const eventId = new ObjectId(id);
+
+      // Check whether event exists
+      const event = await upcommingCollection.findOne({
+        _id: eventId,
+      });
+
+      if (!event) {
+        return res.status(404).json({
+          success: false,
+          message: "Event not found.",
+        });
+      }
+
+      // Only allow joining future events
+      const eventDate = new Date(event.eventDate);
+
+      if (
+        Number.isNaN(eventDate.getTime()) ||
+        eventDate.getTime() <= Date.now()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "This event is no longer available for joining.",
+        });
+      }
+
+      // Check existing registration
+      const existingJoin = await joinedEventsCollection.findOne({
+        eventId,
+        userId: req.user.id,
+      });
+
+      if (existingJoin) {
+        return res.status(409).json({
+          success: false,
+          message: "You have already joined this event.",
+        });
+      }
+
+      // Save joined event information
+      const joinedEvent = {
+        eventId,
+        userId: req.user.id,
+        userName: req.user.name,
+        userEmail: req.user.email,
+        joinedAt: new Date(),
+      };
+
+      await joinedEventsCollection.insertOne(joinedEvent);
+
+      return res.status(201).json({
+        success: true,
+        message: "You have successfully joined the event.",
+      });
+    } catch (error) {
+      // Handle duplicate registration safely
+      if (error.code === 11000) {
+        return res.status(409).json({
+          success: false,
+          message: "You have already joined this event.",
+        });
+      }
+
+      console.error("Join event error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to join event.",
+      });
+    }
+  }
+);
+
 
 async function startServer() {
   try {
+    console.log("Connecting to MongoDB...");
+
     await client.connect();
 
-    await db.command({ ping: 1 });
+    console.log("MongoDB connected successfully!");
 
-    console.log("You successfully connected to MongoDB!");
-    console.log(`Database: ${MONGO_DB}`);
+    console.log("Creating joined-events index...");
 
     app.listen(PORT, () => {
-      console.log(`EduChild API running at http://localhost:${PORT}`);
+      console.log(`Server is running on port ${PORT}`);
+    });
+
+
+    await joinedEventsCollection.createIndex(
+      {
+        eventId: 1,
+        userId: 1,
+      },
+      {
+        unique: true,
+      }
+    );
+
+    console.log("Joined-events index created successfully!");
+
+    app.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
     });
 
   } catch (error) {
     console.error("Server startup failed:", error);
-
-    await client.close().catch(() => {});
-
-    process.exit(1);
   }
 }
 
